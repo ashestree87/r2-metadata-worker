@@ -44,7 +44,6 @@ export async function processPdf(objectMetadata: R2Object, env: Env, ctx: Execut
             3. The overall purpose and content of this document based on what you observe
             
             Be specific and detailed about what you can actually see in the document.
-            Mention any headers, titles, sections, paragraphs, images, and other visible elements.
             
             DO NOT include any formatting markers, prefixes, or phrases like "Here is my analysis:", "Summary:", etc.
             Just provide the direct content description.
@@ -83,25 +82,39 @@ export async function processPdf(objectMetadata: R2Object, env: Env, ctx: Execut
             
             ${visualContent.substring(0, 6000)}
             
-            Based on this visual analysis, please create:
-            1. A clear, concise summary (1-2 paragraphs) describing what this document contains and its purpose
-            2. A list of 5-8 specific tags related to the actual content of this document
+            IMPORTANT: You must follow these exact formatting instructions:
             
-            Important formatting instructions:
-            - For the summary: Write it as plain text with no formatting markers, no asterisks, no "Summary:" prefix
-            - For the tags: After the summary, write "TAGS:" followed by comma-separated tags
-            - Do not use asterisks, quotation marks, or other formatting in the tags
-            - Do not include any phrases like "Here is the response:" or "Summary:" in your response
+            1. Give me ONLY a plain text summary (1-2 paragraphs) with no formatting.
+            2. After the summary, write "TAGS:" followed immediately by a comma-separated list of tags.
             
-            Example format:
+            FORMAT RULES:
+            - NO introduction phrases like "Here is the response:" or "Summary:"
+            - NO asterisks or other markdown formatting (**, *, etc.)
+            - NO quotation marks around the summary or tags
+            - NO newlines except between paragraphs and before the TAGS section
+            - NO header text of any kind
+            
+            Your response must start directly with the summary text and nothing else.
+            
+            CORRECT EXAMPLE:
             This document is a financial report for Q2 2023. It contains quarterly revenue figures, expense breakdowns, and projections for the next quarter. The report includes several bar charts comparing performance metrics across departments.
             
             TAGS: financial, quarterly report, revenue, expenses, projections, charts, q2 2023
+            
+            INCORRECT EXAMPLES:
+            Here is the response:
+            **Summary:**
+            This document is a financial report...
+            
+            Summary: This document is a financial report...
             `;
             
             const summaryResult = await ai.run('@cf/meta/llama-3-8b-instruct', {
                 messages: [
-                    { role: 'system', content: 'You are a document specialist who creates clean, precisely formatted metadata. Always follow the exact output format requested without adding any extra formatting markers, headers, or prefixes.' },
+                    { 
+                        role: 'system', 
+                        content: 'You are a document metadata specialist. Your job is to follow the EXACT formatting instructions without deviation. Never add phrases like "Here is the response" or "Summary:", or any formatting markers like asterisks. Respond with ONLY the requested content in the exact format specified.'
+                    },
                     { role: 'user', content: summaryPrompt }
                 ]
             }) as any;
