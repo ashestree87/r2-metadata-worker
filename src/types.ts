@@ -2,6 +2,7 @@ import { DateTime, Str } from "chanfana";
 import type { Context } from "hono";
 import { z } from "zod";
 import { R2Bucket } from '@cloudflare/workers-types';
+import { Ai } from '@cloudflare/ai';
 
 export type AppContext = Context<{ Bindings: Env }>;
 
@@ -20,6 +21,9 @@ export const Task = z.object({
 export interface Env {
 	// Binding for the R2 bucket
 	MEDIA_BUCKET: R2Bucket;
+
+	// Binding for Cloudflare AI
+	AI: Ai;
 
 	// Example binding to KV. Learn more at https://developers.cloudflare.com/workers/runtime-apis/kv/
 	// MY_KV_NAMESPACE: KVNamespace;

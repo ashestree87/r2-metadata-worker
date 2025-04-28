@@ -2,9 +2,14 @@ name = "r2-metadata-worker"
 main = "src/index.ts"
 compatibility_date = "2025-04-28"
 
+# R2 bucket binding
 [[r2_buckets]]
 binding = "MEDIA_BUCKET"
 bucket_name = "nodo-media-dev"
+
+# AI binding for PDF processing
+[ai]
+binding = "AI"
 
 [triggers]
 crons = ["0 0 * * *"]
