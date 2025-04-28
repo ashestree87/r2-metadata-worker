@@ -99,15 +99,7 @@ export async function processPdf(objectMetadata: R2Object, env: Env, ctx: Execut
             CORRECT EXAMPLE:
             This document is a financial report for Q2 2023. It contains quarterly revenue figures, expense breakdowns, and projections for the next quarter. The report includes several bar charts comparing performance metrics across departments.
             
-            TAGS: financial, quarterly report, revenue, expenses, projections, charts, q2 2023
-            
-            INCORRECT EXAMPLES:
-            Here is the response:
-            **Summary:**
-            This document is a financial report...
-            
-            Summary: This document is a financial report...
-            `;
+            TAGS: financial, quarterly report, revenue, expenses, projections, charts, q2 2023`;
             
             const summaryResult = await ai.run('@cf/meta/llama-3-8b-instruct', {
                 messages: [
@@ -134,7 +126,7 @@ export async function processPdf(objectMetadata: R2Object, env: Env, ctx: Execut
             summary = cleanSummary(summary);
             
             // 7. Create metadata JSON
-            const metadata = {
+            let metadata = {
                 filename: objectName,
                 type: "pdf",
                 summary: summary,
@@ -143,6 +135,9 @@ export async function processPdf(objectMetadata: R2Object, env: Env, ctx: Execut
                 lastModified: object.uploaded,
                 generatedAt: new Date().toISOString(),
             };
+            
+            // Validate and clean the metadata before saving
+            metadata = validateAndCleanOutput(metadata);
 
             // 8. Upload metadata back to R2
             const metadataFilename = `${objectName}.metadata.json`;
@@ -245,7 +240,15 @@ function extractTags(text: string): string[] {
     
     if (tagMatch && tagMatch[1]) {
         // Extract and clean tags
-        const rawTags = tagMatch[1].trim().split(/[,;]/).map(tag => tag.trim().toLowerCase());
+        const rawTags = tagMatch[1].trim().split(/[,;]/).map(tag => {
+            // Clean up each tag - remove asterisks, quotes, and other formatting markers
+            return tag.trim()
+                .toLowerCase()
+                .replace(/^\*+|\*+$/g, '') // Remove asterisks at start/end
+                .replace(/^"+|"+$/g, '')   // Remove quotes at start/end
+                .replace(/^'|'$/g, '')     // Remove single quotes at start/end
+                .replace(/^\[|\]$/g, '');  // Remove brackets at start/end
+        });
         
         // Filter out empty tags and add to default tags
         const extractedTags = rawTags.filter(tag => tag.length > 0);
@@ -258,11 +261,82 @@ function extractTags(text: string): string[] {
 }
 
 /**
- * Clean summary text by removing tags section
+ * Clean summary text by removing tags section and formatting markers
  */
 function cleanSummary(text: string): string {
-    // Remove tags section from summary
-    return text.replace(/TAGS:(.+?)($|(?:\n\n))/s, '').trim();
+    // First, extract everything before the TAGS: section
+    let summary = text;
+    const tagsIndex = text.toUpperCase().indexOf('TAGS:');
+    if (tagsIndex !== -1) {
+        summary = text.substring(0, tagsIndex).trim();
+    }
+    
+    // Remove common formatting patterns
+    summary = summary
+        // Remove prefix phrases
+        .replace(/^(?:here is the response:?|here's the response:?|my response:?)/i, '')
+        .replace(/^(?:summary:?|content:?|description:?|analysis:?)/i, '')
+        
+        // Remove markdown and formatting
+        .replace(/\*\*Summary:?\*\*/gi, '')
+        .replace(/\*\*Summary \([^)]+\):?\*\*/gi, '')
+        .replace(/\*\*/g, '')  // Remove all remaining double asterisks
+        .replace(/\*/g, '')    // Remove all remaining single asterisks
+        
+        // Fix newlines and spacing
+        .replace(/^\s+/gm, '')  // Remove leading whitespace from each line
+        .replace(/\n{3,}/g, '\n\n')  // Replace 3+ consecutive newlines with just 2
+        .trim();
+    
+    return summary;
+}
+
+// Add this function to perform a final validation of our processed output
+function validateAndCleanOutput(metadata: any): any {
+    // Clone the metadata object
+    const cleanedMetadata = { ...metadata };
+    
+    // Handle summary
+    if (typeof cleanedMetadata.summary === 'string') {
+        // Remove any remaining formatting markers we might have missed
+        let summary = cleanedMetadata.summary;
+        
+        // Check for common issues
+        if (summary.includes("Here is") || 
+            summary.includes("Summary:") || 
+            summary.includes("**") ||
+            summary.startsWith("\n")) {
+            
+            // Apply more aggressive cleaning
+            summary = summary
+                .replace(/^[\s\n]*(?:here is|here's)[^:\n]*:?[\s\n]*/i, '')
+                .replace(/^[\s\n]*(?:\*\*)?summary(?:\*\*)?:?[\s\n]*/i, '')
+                .replace(/\*\*[^*]*\*\*/g, '')
+                .replace(/\n{3,}/g, '\n\n')
+                .trim();
+        }
+        
+        cleanedMetadata.summary = summary;
+    }
+    
+    // Handle tags
+    if (Array.isArray(cleanedMetadata.tags)) {
+        // Clean each tag
+        cleanedMetadata.tags = cleanedMetadata.tags.map(tag => {
+            if (typeof tag === 'string') {
+                return tag
+                    .replace(/^\*\*|\*\*$/g, '')  // Remove ** markers
+                    .replace(/^""|""$/g, '')      // Remove "" markers
+                    .trim();
+            }
+            return tag;
+        });
+        
+        // Ensure no duplicate tags
+        cleanedMetadata.tags = [...new Set(cleanedMetadata.tags)];
+    }
+    
+    return cleanedMetadata;
 }
 
 /**
