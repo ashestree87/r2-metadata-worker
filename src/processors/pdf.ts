@@ -26,17 +26,25 @@ export async function processPdf(objectMetadata: R2Object, env: Env, ctx: Execut
             // Process the PDF with Cloudflare AI
             const ai = env.AI;
             
-            // First, extract text from the PDF - using any type due to incomplete type definitions
-            const extractionResult = await ai.run('@cf/baai/bge-large-en-v1.5', {
-                document: pdfBuffer
-            } as any) as any;
+            // For PDFs, we need to use a document-specific model to extract text
+            // Using string literal to bypass TypeScript ModelName limitations
+            const extractionResult = await (ai as any).run('@cf/huggingface/microsoft/florence-2-base', {
+                text: "Extract the text content from this PDF document",
+                image: [...new Uint8Array(pdfBuffer)]
+            });
             
             // If we can't extract text, fall back to a placeholder
-            if (!extractionResult || !extractionResult.text) {
-                throw new Error("Failed to extract text from PDF");
+            if (!extractionResult || typeof extractionResult !== 'string') {
+                throw new Error("Failed to extract text from PDF - invalid response format");
             }
             
-            const extractedText = extractionResult.text as string;
+            const extractedText = extractionResult as string;
+            
+            if (!extractedText || extractedText.trim().length === 0) {
+                throw new Error("Extracted text is empty");
+            }
+            
+            console.log(`Successfully extracted text from PDF ${objectName}: ${extractedText.substring(0, 100)}...`);
             
             // Now generate a summary using the extracted text
             const summaryPrompt = `
@@ -51,12 +59,18 @@ export async function processPdf(objectMetadata: R2Object, env: Env, ctx: Execut
                 messages: [
                     { role: 'system', content: 'You are a helpful assistant that summarizes PDF documents and extracts relevant tags.' },
                     { role: 'user', content: summaryPrompt }
-                ],
-                max_tokens: 500
+                ]
             }) as any;
             
             // Parse the summary and tags from the AI response
-            let summary = summaryResult.response || "Failed to generate summary";
+            let summary = "";
+            if (typeof summaryResult === 'string') {
+                summary = summaryResult;
+            } else if (summaryResult && summaryResult.response) {
+                summary = summaryResult.response;
+            } else {
+                throw new Error("Failed to generate summary - invalid response format");
+            }
             
             // Extract tags from the summary - look for keywords, lists, or tags sections
             const tagMatches = summary.match(/keywords|tags|key terms|topics|subjects?:?\s*([\w\s,\-]+)/i);

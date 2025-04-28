@@ -32,7 +32,7 @@ import { processPdf } from './processors/pdf'; // Import processPdf
 // TODO: Define processVideo function similarly
 
 // Helper function to contain our main worker logic
-async function processAllMedia(env: Env, ctx: ExecutionContext, options = {}): Promise<{ processed: number, skipped: number, errors: number }> {
+async function processAllMedia(env: Env, ctx: ExecutionContext, options: { forceReprocess?: boolean } = {}): Promise<{ processed: number, skipped: number, errors: number }> {
 	console.log('Starting media processing...');
 	
 	const stats = {
@@ -64,6 +64,11 @@ async function processAllMedia(env: Env, ctx: ExecutionContext, options = {}): P
 			const processingPromises: Promise<void>[] = [];
 			for (const object of listing.objects) {
 				const objectName = object.key;
+				// Skip metadata files themselves
+				if (objectName.endsWith('.metadata.json')) {
+					continue;
+				}
+				
 				const metadataFilename = `${objectName}.metadata.json`;
 
 				// 1. Check file extension
@@ -75,48 +80,33 @@ async function processAllMedia(env: Env, ctx: ExecutionContext, options = {}): P
 					continue; // Skip this object
 				}
 
-				// 2. Check if metadata already exists
-				// We can do a quick HEAD request to see if the metadata file exists.
-				// Note: This adds an extra R2 operation per file.
-				const metadataCheckPromise = env.MEDIA_BUCKET.head(metadataFilename).then(metadataObject => {
-					if (metadataObject !== null) {
-						// console.log(`Metadata already exists for: ${objectName}`);
-						stats.skipped++;
-						return; // Metadata exists, skip processing
-					}
-
-					// Metadata doesn't exist, proceed with processing
-					console.log(`Processing file: ${objectName}`);
-					// Call the appropriate processing function based on fileExtension
-					if (['.jpg', '.jpeg', '.png'].includes(fileExtension)) {
-						// Enqueue the processing task to ensure it completes
-						try {
-							ctx.waitUntil(processImage(object, env, ctx));
-							stats.processed++;
-						} catch (error) {
-							console.error(`Error processing image ${objectName}:`, error);
-							stats.errors++;
+				// 2. Check if metadata already exists (unless force reprocess is enabled)
+				if (!options.forceReprocess) {
+					const metadataCheckPromise = env.MEDIA_BUCKET.head(metadataFilename).then(metadataObject => {
+						if (metadataObject !== null) {
+							// console.log(`Metadata already exists for: ${objectName}`);
+							stats.skipped++;
+							return; // Metadata exists, skip processing
 						}
-					} else if (fileExtension === '.mp4') {
-						// ctx.waitUntil(processVideo(object, env, ctx));
-						console.log(`Video processing not yet implemented for: ${objectName}`);
-						stats.skipped++;
-					} else if (fileExtension === '.pdf') {
-						// Enqueue the processing task
-						try {
-							ctx.waitUntil(processPdf(object, env, ctx));
-							stats.processed++;
-						} catch (error) {
-							console.error(`Error processing PDF ${objectName}:`, error);
-							stats.errors++;
-						}
-					}
-				}).catch(err => {
-					console.error(`Error checking metadata for ${objectName}:`, err);
-					stats.errors++;
-				});
 
-				processingPromises.push(metadataCheckPromise);
+						return processFile(object, fileExtension, env, ctx, stats);
+					}).catch(err => {
+						console.error(`Error checking metadata for ${objectName}:`, err);
+						stats.errors++;
+					});
+
+					processingPromises.push(metadataCheckPromise);
+				} else {
+					// Force reprocess is enabled, process regardless of existing metadata
+					console.log(`Force reprocessing file: ${objectName}`);
+					const processPromise = processFile(object, fileExtension, env, ctx, stats)
+						.catch(err => {
+							console.error(`Error processing ${objectName}:`, err);
+							stats.errors++;
+						});
+					
+					processingPromises.push(processPromise);
+				}
 			}
 
 			// Wait for all metadata checks to resolve
@@ -134,6 +124,33 @@ async function processAllMedia(env: Env, ctx: ExecutionContext, options = {}): P
 	}
 	
 	return stats;
+}
+
+// Helper function to process a single file based on its extension
+async function processFile(object: R2Object, fileExtension: string, env: Env, ctx: ExecutionContext, stats: { processed: number, skipped: number, errors: number }): Promise<void> {
+	const objectName = object.key;
+	console.log(`Processing file: ${objectName}`);
+	
+	try {
+		// Call the appropriate processing function based on fileExtension
+		if (['.jpg', '.jpeg', '.png'].includes(fileExtension)) {
+			// Enqueue the processing task to ensure it completes
+			await processImage(object, env, ctx);
+			stats.processed++;
+		} else if (fileExtension === '.mp4') {
+			// processVideo not yet implemented
+			console.log(`Video processing not yet implemented for: ${objectName}`);
+			stats.skipped++;
+		} else if (fileExtension === '.pdf') {
+			// Enqueue the processing task
+			await processPdf(object, env, ctx);
+			stats.processed++;
+		}
+	} catch (error) {
+		console.error(`Error processing ${objectName}:`, error);
+		stats.errors++;
+		throw error; // Rethrow to be caught by the caller
+	}
 }
 
 // HTML template for the UI
@@ -228,6 +245,17 @@ function getHtmlTemplate(message = '', processingStats = null, diagnostics = '')
 			margin-top: 20px;
 			border: 1px solid #e2e8f0;
 		}
+		.options {
+			margin-top: 15px;
+		}
+		.checkbox-wrapper {
+			display: flex;
+			align-items: center;
+			margin-bottom: 15px;
+		}
+		.checkbox-wrapper input[type="checkbox"] {
+			margin-right: 8px;
+		}
 	</style>
 </head>
 <body>
@@ -237,6 +265,12 @@ function getHtmlTemplate(message = '', processingStats = null, diagnostics = '')
 		<h2>Manual Execution</h2>
 		<p>Click the button below to start processing media files in your R2 bucket.</p>
 		<form method="POST">
+			<div class="options">
+				<div class="checkbox-wrapper">
+					<input type="checkbox" id="force-reprocess" name="force-reprocess" value="1">
+					<label for="force-reprocess">Force Reprocess (regenerate metadata even if it already exists)</label>
+				</div>
+			</div>
 			<button type="submit">Process Media Files</button>
 		</form>
 	</div>
@@ -283,13 +317,15 @@ function getHtmlTemplate(message = '', processingStats = null, diagnostics = '')
 export default {
 	/**
 	 * This function is triggered by the cron schedule defined in wrangler.toml.
-	 * @param controller - Contains metadata about the scheduled event.
-	 * @param env - Contains the bindings configured in wrangler.toml.
-	 * @param ctx - Execution context, used for tasks like waiting for promises to settle.
 	 */
 	async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
 		console.log(`Scheduled event triggered at: ${new Date(controller.scheduledTime)}`);
-		await processAllMedia(env, ctx);
+		
+		// By default, don't force reprocess in scheduled runs
+		// To force reprocess, you'd need to trigger it manually with the force option
+		const forceReprocess = false;
+		
+		await processAllMedia(env, ctx, { forceReprocess });
 	},
 
 	/**
@@ -297,6 +333,40 @@ export default {
 	 */
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
+		
+		// Check if this is a cron trigger or similar service worker by looking at the user agent
+		const userAgent = request.headers.get('User-Agent') || '';
+		const isCronTrigger = userAgent.includes('Cloudflare-Workers') || 
+							userAgent.includes('Cloudflare-Scheduler') || 
+							userAgent.includes('Cronjob');
+							
+		if (isCronTrigger) {
+			console.log('Detected cron trigger or service worker request, running scheduled processing');
+			
+			// Check for force parameter in scheduled requests too
+			const forceReprocess = url.searchParams.has('force');
+			
+			// Process media but return minimal response
+			try {
+				const stats = await processAllMedia(env, ctx, { forceReprocess });
+				return new Response(JSON.stringify({
+					status: 'success',
+					message: 'Scheduled processing completed',
+					forceReprocess,
+					stats
+				}), {
+					headers: { 'Content-Type': 'application/json' }
+				});
+			} catch (error: any) {
+				return new Response(JSON.stringify({
+					status: 'error',
+					message: error.message || 'Unknown error'
+				}), {
+					status: 500,
+					headers: { 'Content-Type': 'application/json' }
+				});
+			}
+		}
 		
 		// Add a simple test endpoint to debug R2 access
 		if (url.pathname === '/test-r2') {
@@ -369,13 +439,28 @@ export default {
 		<div class="diagnostic">
 			<h3>Binding Diagnostics</h3>
 			<p>R2 Bucket Binding Status: <strong>${typeof env.MEDIA_BUCKET === 'undefined' ? '❌ Missing' : '✅ Available'}</strong></p>
+			<p>AI Binding Status: <strong>${typeof env.AI === 'undefined' ? '❌ Missing' : '✅ Available'}</strong></p>
 			<p><a href="/test-r2" target="_blank">Run R2 Connection Test</a></p>
 		</div>`;
 		
-		// Handle POST request (manual execution)
+		// Handle POST request (manual execution) - ONLY process on POST
 		if (request.method === 'POST') {
 			try {
-				const stats = await processAllMedia(env, ctx);
+				// Check if forceReprocess is enabled
+				let formData: FormData | null = null;
+				let forceReprocess = false;
+				
+				try {
+					formData = await request.formData();
+					forceReprocess = formData.has('force-reprocess');
+				} catch (e) {
+					// If we can't parse form data, proceed without force reprocess
+					console.log('Could not parse form data:', e);
+				}
+				
+				console.log(`Processing with force reprocess: ${forceReprocess}`);
+				
+				const stats = await processAllMedia(env, ctx, { forceReprocess });
 				return new Response(getHtmlTemplate(`Successfully executed media processing at ${new Date().toISOString()}`, stats, diagnosticsHtml), {
 					headers: { 'Content-Type': 'text/html' },
 				});
@@ -388,7 +473,7 @@ export default {
 			}
 		}
 		
-		// Default: show UI for GET requests
+		// Default: ONLY show UI for GET requests, no processing
 		return new Response(getHtmlTemplate('', null, diagnosticsHtml), {
 			headers: { 'Content-Type': 'text/html' },
 		});
