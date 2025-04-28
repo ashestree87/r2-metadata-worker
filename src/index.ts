@@ -137,7 +137,7 @@ async function processAllMedia(env: Env, ctx: ExecutionContext, options = {}): P
 }
 
 // HTML template for the UI
-function getHtmlTemplate(message = '', processingStats = null) {
+function getHtmlTemplate(message = '', processingStats = null, diagnostics = '') {
 	return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -221,6 +221,13 @@ function getHtmlTemplate(message = '', processingStats = null) {
 		.stat-card.errors p {
 			color: #ef4444;
 		}
+		.diagnostic {
+			background-color: #f8fafc;
+			padding: 15px;
+			border-radius: 8px;
+			margin-top: 20px;
+			border: 1px solid #e2e8f0;
+		}
 	</style>
 </head>
 <body>
@@ -233,6 +240,8 @@ function getHtmlTemplate(message = '', processingStats = null) {
 			<button type="submit">Process Media Files</button>
 		</form>
 	</div>
+
+	${diagnostics}
 
 	${message ? `
 	<div class="status ${message.includes('Error') ? 'error' : 'success'}">
@@ -297,7 +306,33 @@ export default {
 			
 			try {
 				if (!env.MEDIA_BUCKET) {
-					return new Response('Error: MEDIA_BUCKET binding is undefined', { status: 500 });
+					return new Response(JSON.stringify({
+						success: false,
+						error: 'MEDIA_BUCKET binding is undefined',
+						availableBindings: Object.keys(env),
+						environment: {
+							// Include additional environment info
+							nodeVersion: process.versions?.node || 'unknown',
+							bindingType: typeof env.MEDIA_BUCKET,
+							hasMediaBucketProperty: 'MEDIA_BUCKET' in env
+						}
+					}, null, 2), { 
+						status: 500,
+						headers: { 'Content-Type': 'application/json' }
+					});
+				}
+				
+				// Check if the binding has the correct type
+				if (typeof env.MEDIA_BUCKET.list !== 'function') {
+					return new Response(JSON.stringify({
+						success: false,
+						error: 'MEDIA_BUCKET binding exists but does not appear to be an R2 bucket',
+						bindingType: typeof env.MEDIA_BUCKET,
+						hasListMethod: typeof env.MEDIA_BUCKET.list === 'function'
+					}, null, 2), { 
+						status: 500,
+						headers: { 'Content-Type': 'application/json' }
+					});
 				}
 				
 				// Try listing just 1 object to test access
@@ -313,7 +348,7 @@ export default {
 						key: obj.key,
 						size: obj.size
 					}))
-				}), {
+				}, null, 2), {
 					headers: { 'Content-Type': 'application/json' }
 				});
 			} catch (error: any) {
@@ -322,23 +357,31 @@ export default {
 					error: error.message,
 					stack: error.stack,
 					bucketAvailable: !!env.MEDIA_BUCKET
-				}), {
+				}, null, 2), {
 					status: 500,
 					headers: { 'Content-Type': 'application/json' }
 				});
 			}
 		}
 		
+		// Generate diagnostics HTML
+		const diagnosticsHtml = `
+		<div class="diagnostic">
+			<h3>Binding Diagnostics</h3>
+			<p>R2 Bucket Binding Status: <strong>${typeof env.MEDIA_BUCKET === 'undefined' ? '❌ Missing' : '✅ Available'}</strong></p>
+			<p><a href="/test-r2" target="_blank">Run R2 Connection Test</a></p>
+		</div>`;
+		
 		// Handle POST request (manual execution)
 		if (request.method === 'POST') {
 			try {
 				const stats = await processAllMedia(env, ctx);
-				return new Response(getHtmlTemplate(`Successfully executed media processing at ${new Date().toISOString()}`, stats), {
+				return new Response(getHtmlTemplate(`Successfully executed media processing at ${new Date().toISOString()}`, stats, diagnosticsHtml), {
 					headers: { 'Content-Type': 'text/html' },
 				});
 			} catch (error: any) {
 				console.error('Error during manual execution:', error);
-				return new Response(getHtmlTemplate(`Error: ${error.message || 'Unknown error during processing'}`), {
+				return new Response(getHtmlTemplate(`Error: ${error.message || 'Unknown error during processing'}`, null, diagnosticsHtml), {
 					headers: { 'Content-Type': 'text/html' },
 					status: 500,
 				});
@@ -346,7 +389,7 @@ export default {
 		}
 		
 		// Default: show UI for GET requests
-		return new Response(getHtmlTemplate(), {
+		return new Response(getHtmlTemplate('', null, diagnosticsHtml), {
 			headers: { 'Content-Type': 'text/html' },
 		});
 	},
