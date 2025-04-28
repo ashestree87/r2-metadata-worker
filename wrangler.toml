@@ -19,4 +19,4 @@ crons = ["0 0 * * *"]
 remote = true # Allows wrangler dev to access external services
 
 # You might also need to add account_id if it's not already there
-# account_id = "49ef1ba682ad8cfd720c86699ae17521" 
+account_id = "49ef1ba682ad8cfd720c86699ae17521"
