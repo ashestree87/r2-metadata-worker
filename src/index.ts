@@ -289,6 +289,46 @@ export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
 		
+		// Add a simple test endpoint to debug R2 access
+		if (url.pathname === '/test-r2') {
+			// Simple logging to debug
+			console.log('MEDIA_BUCKET binding type:', typeof env.MEDIA_BUCKET);
+			console.log('Available environment bindings:', Object.keys(env));
+			
+			try {
+				if (!env.MEDIA_BUCKET) {
+					return new Response('Error: MEDIA_BUCKET binding is undefined', { status: 500 });
+				}
+				
+				// Try listing just 1 object to test access
+				const listing = await env.MEDIA_BUCKET.list({
+					limit: 1
+				});
+				
+				return new Response(JSON.stringify({
+					success: true,
+					bucketAvailable: true,
+					objectCount: listing.objects.length,
+					objects: listing.objects.map(obj => ({
+						key: obj.key,
+						size: obj.size
+					}))
+				}), {
+					headers: { 'Content-Type': 'application/json' }
+				});
+			} catch (error: any) {
+				return new Response(JSON.stringify({
+					success: false,
+					error: error.message,
+					stack: error.stack,
+					bucketAvailable: !!env.MEDIA_BUCKET
+				}), {
+					status: 500,
+					headers: { 'Content-Type': 'application/json' }
+				});
+			}
+		}
+		
 		// Handle POST request (manual execution)
 		if (request.method === 'POST') {
 			try {
