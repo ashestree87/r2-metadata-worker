@@ -41,18 +41,14 @@ export async function processPdf(objectMetadata: R2Object, env: Env, ctx: Execut
             
             console.log(`Converted PDF to base64, size: ${base64Data.length} chars`);
             
-            // Approach 1: Try text extraction first
-            let extractedText = await tryTextExtraction(objectName, bytes, ai);
-
-            // Approach 2: If text extraction didn't yield meaningful results, try vision-based approach
-            if (!extractedText || extractedText.trim().length < 100) {
-                console.log(`Text extraction yielded minimal results, trying vision approach for PDF ${objectName}`);
-                extractedText = await tryVisionExtraction(objectName, base64Data, ai);
-            }
+            // UPDATED APPROACH: Use vision-based OCR as primary method
+            // We're prioritizing visual content analysis over text extraction
+            console.log(`Using vision-based analysis for PDF ${objectName}`);
+            let extractedContent = await useVisionOCR(objectName, base64Data, ai);
             
             // Generate a summary from the extracted content
-            console.log(`Extracted content length: ${extractedText.length} chars`);
-            const summaryResult = await generateSummary(objectName, extractedText, ai);
+            console.log(`Extracted content length: ${extractedContent.length} chars`);
+            const summaryResult = await generateSummary(objectName, extractedContent, ai);
             
             // Extract tags and clean summary
             const { summary, tags } = processAiResponse(summaryResult);
@@ -62,7 +58,7 @@ export async function processPdf(objectMetadata: R2Object, env: Env, ctx: Execut
                 filename: objectName,
                 type: "pdf",
                 summary: summary,
-                tags: tags,
+                tags: tags.filter((tag, index) => tags.indexOf(tag) === index), // Remove duplicate tags
                 size: object.size,
                 lastModified: object.uploaded,
                 generatedAt: new Date().toISOString(),
@@ -110,64 +106,32 @@ export async function processPdf(objectMetadata: R2Object, env: Env, ctx: Execut
 }
 
 /**
- * Attempts to extract text content from a PDF using an LLM approach
+ * Uses vision-based OCR to analyze PDF content
+ * This is now our primary approach for all PDFs
  */
-async function tryTextExtraction(filename: string, bytes: Uint8Array, ai: Ai): Promise<string> {
-    // First, try PDF text extraction with Llama model
-    const extractionPrompt = `
-    You are an expert PDF text extractor. I'll provide the beginning bytes of a PDF document. 
-    Based on your knowledge of PDF structure:
-    
-    1. Identify any text content in this file
-    2. Especially focus on extracting titles, headings, and key content sections
-    3. Extract any table content if present
-    
-    PDF Name: "${filename}"
-    First few bytes (hex): ${Array.from(bytes.slice(0, 100)).map(b => b.toString(16).padStart(2, '0')).join(' ')}
-    `;
-    
-    // Try to extract text and metadata from the PDF
-    const extractionResult = await ai.run('@cf/meta/llama-3-8b-instruct', {
-        messages: [
-            { role: 'system', content: 'You are an expert at extracting and understanding PDF document contents.' },
-            { role: 'user', content: extractionPrompt }
-        ]
-    }) as any;
-    
-    if (typeof extractionResult === 'string') {
-        return extractionResult;
-    } else if (extractionResult && extractionResult.response) {
-        return extractionResult.response;
-    }
-    
-    return ""; // Return empty string if extraction failed
-}
-
-/**
- * Attempts to extract content from a PDF using a vision-based approach
- * for image-based or scanned PDFs
- */
-async function tryVisionExtraction(filename: string, base64Data: string, ai: Ai): Promise<string> {
+async function useVisionOCR(filename: string, base64Data: string, ai: Ai): Promise<string> {
     try {
-        // For image-based PDFs, we'll treat the PDF as an image and use vision models
-        // We need to convert our base64 data to a data URL for the vision model
+        // Create a data URL for the vision model
         const dataUrl = `data:application/pdf;base64,${base64Data}`;
         
+        // First page analysis
         const visionPrompt = `
-        This is a PDF document named "${filename}". 
-        Please analyze this as if it's a scanned document or image-based PDF.
+        You are examining a PDF document named "${filename}".
         
-        1. What text content can you see in this PDF?
-        2. Describe any visible titles, headings, paragraphs and images
-        3. Extract any table data if visible
-        4. Look for any important information like dates, names, or key facts
+        Please analyze this PDF thoroughly and provide a DETAILED description of what you see:
         
-        Please provide a detailed description of all visible content.
+        1. What is the overall document about? What's its purpose?
+        2. Describe all visible text content including headings, paragraphs, and important text
+        3. Describe any visible images, diagrams, charts or graphics
+        4. Extract any structured data like tables with their contents
+        5. Note any key information like dates, names, prices, or other important facts
+        
+        Be as specific and comprehensive as possible. Think of yourself as creating a text version
+        of this PDF for someone who cannot see it.
         `;
         
-        // Use the vision model to "see" what's in the PDF
         // Use type casting to bypass TypeScript ModelName limitations
-        const visionResult = await (ai as any).run('@cf/meta/llama-3-8b-vision', {
+        const firstPageResult = await (ai as any).run('@cf/meta/llama-3-8b-vision', {
             messages: [
                 { 
                     role: 'user', 
@@ -179,42 +143,108 @@ async function tryVisionExtraction(filename: string, base64Data: string, ai: Ai)
             ]
         });
         
-        if (typeof visionResult === 'string') {
-            return visionResult;
-        } else if (visionResult && visionResult.response) {
-            return visionResult.response;
-        } else if (visionResult && visionResult.content) {
-            return visionResult.content;
+        let extractedText = "";
+        if (typeof firstPageResult === 'string') {
+            extractedText = firstPageResult;
+        } else if (firstPageResult && firstPageResult.response) {
+            extractedText = firstPageResult.response;
+        } else if (firstPageResult && firstPageResult.content) {
+            extractedText = firstPageResult.content;
+        } else {
+            throw new Error("Invalid vision model response format");
         }
         
-        throw new Error("Invalid vision model response format");
+        // If the PDF might have multiple pages, we should note that in our results
+        if (pdfMightHaveMultiplePages(extractedText)) {
+            extractedText += "\n\nNote: This PDF may contain multiple pages. The analysis above covers primarily the first visible page.";
+        }
+        
+        return extractedText;
     } catch (error: any) {
-        console.error(`Vision-based extraction failed for ${filename}:`, error);
-        return `[Vision extraction failed: ${error.message || "Unknown error"}]`;
+        console.error(`Vision-based OCR failed for ${filename}:`, error);
+        
+        // Try a fallback method with the generic model instead
+        try {
+            console.log(`Trying fallback extraction for ${filename}`);
+            return await fallbackContentExtraction(filename, ai);
+        } catch (fallbackError) {
+            return `[Content extraction failed: ${error.message || "Unknown error"}. Fallback also failed.]`;
+        }
     }
+}
+
+/**
+ * Check if the PDF might have multiple pages based on the extracted text
+ */
+function pdfMightHaveMultiplePages(extractedText: string): boolean {
+    const multiPageIndicators = [
+        /page \d+/i,
+        /\bpages?\b/i,
+        /continues/i,
+        /continued/i,
+        /\bnext\b/i,
+        /section \d+/i
+    ];
+    
+    return multiPageIndicators.some(pattern => pattern.test(extractedText));
+}
+
+/**
+ * Fallback method if vision OCR fails
+ */
+async function fallbackContentExtraction(filename: string, ai: Ai): Promise<string> {
+    // Generate content based on the filename as a fallback
+    const fallbackPrompt = `
+    I have a PDF document named "${filename}" that I cannot process directly.
+    Based on this filename, please:
+    
+    1. Generate a detailed description of what this document likely contains
+    2. Make educated guesses about its structure and content
+    3. Highlight key elements one might expect to find in such a document
+    
+    Be specific and practical in your suggestions while acknowledging you haven't seen the actual content.
+    `;
+    
+    const fallbackResult = await ai.run('@cf/meta/llama-3-8b-instruct', {
+        messages: [
+            { role: 'system', content: 'You are a helpful assistant that can make educated guesses about document content based on filenames.' },
+            { role: 'user', content: fallbackPrompt }
+        ]
+    }) as any;
+    
+    if (typeof fallbackResult === 'string') {
+        return fallbackResult + "\n\n[Note: This is a best-guess description based on the filename, not actual content analysis.]";
+    } else if (fallbackResult && fallbackResult.response) {
+        return fallbackResult.response + "\n\n[Note: This is a best-guess description based on the filename, not actual content analysis.]";
+    }
+    
+    throw new Error("Fallback extraction failed - invalid response format");
 }
 
 /**
  * Generates a summary from extracted PDF content
  */
-async function generateSummary(filename: string, extractedText: string, ai: Ai): Promise<any> {
+async function generateSummary(filename: string, extractedContent: string, ai: Ai): Promise<any> {
     // Limit the extracted text to avoid exceeding model context
     const maxLength = 10000;
-    const truncatedText = extractedText.length > maxLength 
-        ? extractedText.substring(0, maxLength) + "... [truncated]" 
-        : extractedText;
+    const truncatedText = extractedContent.length > maxLength 
+        ? extractedContent.substring(0, maxLength) + "... [truncated]" 
+        : extractedContent;
     
     const summaryPrompt = `
-    I've extracted the following content from a PDF document named "${filename}":
+    I've analyzed the PDF document "${filename}" and extracted the following content:
     
     ${truncatedText}
     
     Based on this content, please:
     
-    1. Provide a concise 1-2 paragraph summary of what this document contains
-    2. Create a list of 5-10 relevant keyword tags that categorize this document content
+    1. Provide a clear, concise 1-2 paragraph summary of what this document contains and its purpose
+    2. Create a list of 5-10 relevant keyword tags that categorize this document content (avoid duplicates)
     
-    Format your response with a summary paragraph followed by "TAGS:" and then a comma-separated list of tags.
+    Format your response as follows:
+    [Summary in 1-2 paragraphs]
+    
+    TAGS: tag1, tag2, tag3, tag4, tag5
     `;
     
     return ai.run('@cf/meta/llama-3-8b-instruct', {
